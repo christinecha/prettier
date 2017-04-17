@@ -31,6 +31,13 @@ var namedTypes = types.namedTypes;
 var isString = types.builtInTypes.string;
 var isObject = types.builtInTypes.object;
 
+// Resources for a multi-node ignore state.
+var shouldIgnore = false;
+var START_IGNORE_DIRECTIVE = "prettier-start-ignore";
+var END_IGNORE_DIRECTIVE = "prettier-end-ignore";
+var IGNORE_DIRECTIVE = "prettier-ignore";
+
+
 function shouldPrintComma(options, level) {
   level = level || "es5";
 
@@ -49,6 +56,10 @@ function shouldPrintComma(options, level) {
   }
 }
 
+function isCommentValue(node, value) {
+  return node.comments.some(comment => comment.value.trim() === value)
+}
+
 function genericPrint(path, options, printPath, args) {
   assert.ok(path instanceof FastPath);
 
@@ -64,10 +75,26 @@ function genericPrint(path, options, printPath, args) {
   // Escape hatch
   if (
     node.comments &&
-    node.comments.length > 0 &&
-    node.comments.some(comment => comment.value.trim() === "prettier-ignore")
+    node.comments.length > 0
   ) {
-    return options.originalText.slice(util.locStart(node), util.locEnd(node));
+
+    // Start multi-node ignore.
+    if (isCommentValue(node, START_IGNORE_DIRECTIVE)) {
+      shouldIgnore = true;
+    }
+
+    // End multi-node ignore.
+    if (isCommentValue(node, END_IGNORE_DIRECTIVE)) {
+      shouldIgnore = false;
+    }
+
+    // Return the original text if requested.
+    if (
+      shouldIgnore ||
+      isCommentValue(node, IGNORE_DIRECTIVE)
+    ) {
+      return options.originalText.slice(util.locStart(node), util.locEnd(node));
+    }
   }
 
   if (
@@ -238,17 +265,15 @@ function genericPrintNoParens(path, options, print, args) {
       do {
         firstNonMemberParent = path.getParentNode(i);
         i++;
-      } while (
-        firstNonMemberParent &&
-        firstNonMemberParent.type === "MemberExpression"
-      );
+      } while (firstNonMemberParent &&
+        firstNonMemberParent.type === "MemberExpression");
 
       const shouldInline =
-        firstNonMemberParent && (
-          (firstNonMemberParent.type === "VariableDeclarator" &&
+        (firstNonMemberParent &&
+          ((firstNonMemberParent.type === "VariableDeclarator" &&
             firstNonMemberParent.id.type !== "Identifier") ||
-          (firstNonMemberParent.type === "AssignmentExpression" &&
-            firstNonMemberParent.left.type !== "Identifier")) ||
+            (firstNonMemberParent.type === "AssignmentExpression" &&
+              firstNonMemberParent.left.type !== "Identifier"))) ||
         n.computed ||
         (n.object.type === "Identifier" &&
           n.property.type === "Identifier" &&
@@ -722,10 +747,8 @@ function genericPrintNoParens(path, options, print, args) {
 
       const lastElem = util.getLast(n[propertiesField]);
 
-      const canHaveTrailingComma = !(
-        lastElem &&
-        (lastElem.type === "RestProperty" || lastElem.type === "RestElement")
-      );
+      const canHaveTrailingComma = !(lastElem &&
+        (lastElem.type === "RestProperty" || lastElem.type === "RestElement"));
 
       const shouldBreak =
         n.type !== "ObjectPattern" &&
@@ -1351,9 +1374,11 @@ function genericPrintNoParens(path, options, print, args) {
     case "JSXText":
       throw new Error("JSXTest should be handled by JSXElement");
     case "JSXEmptyExpression":
-      const requiresHardline = n.comments && n.comments.some(
-        comment => comment.type === "Line" || comment.type === "CommentLine"
-      );
+      const requiresHardline =
+        n.comments &&
+        n.comments.some(
+          comment => comment.type === "Line" || comment.type === "CommentLine"
+        );
 
       return concat([
         comments.printDanglingComments(
@@ -2006,10 +2031,7 @@ function printStatementSequence(path, options, print) {
 
     // in no-semi mode, prepend statement with semicolon if it might break ASI
     if (!options.semi && !isClass && stmtNeedsASIProtection(stmtPath)) {
-      if (
-        stmt.comments &&
-        stmt.comments.some(comment => comment.leading)
-      ) {
+      if (stmt.comments && stmt.comments.some(comment => comment.leading)) {
         // Note: stmtNeedsASIProtection requires stmtPath to already be printed
         // as it reads needsParens which is mutated on the instance
         parts.push(print(stmtPath, { needsSemi: true }));
@@ -2019,7 +2041,6 @@ function printStatementSequence(path, options, print) {
     } else {
       parts.push(stmtPrinted);
     }
-
 
     if (!options.semi && isClass) {
       if (classPropMayCauseASIProblems(stmtPath)) {
@@ -2183,9 +2204,9 @@ function printArgumentsList(path, options, print) {
     let i = 0;
     path.each(function(argPath) {
       if (shouldGroupFirst && i === 0) {
-        printedExpanded =
-          [argPath.call(p => print(p, { expandFirstArg: true }))]
-            .concat(printed.slice(1));
+        printedExpanded = [
+          argPath.call(p => print(p, { expandFirstArg: true }))
+        ].concat(printed.slice(1));
       }
       if (shouldGroupLast && i === args.length - 1) {
         printedExpanded = printed
@@ -2337,7 +2358,8 @@ function printFunctionParams(path, print, options, expandArg) {
     fun[paramsField].length === 1 &&
     fun[paramsField][0].name === null &&
     fun[paramsField][0].typeAnnotation &&
-    flowTypeAnnotations.indexOf(fun[paramsField][0].typeAnnotation.type) !== -1 &&
+    flowTypeAnnotations.indexOf(fun[paramsField][0].typeAnnotation.type) !==
+      -1 &&
     !fun.rest;
 
   return concat([
@@ -3224,10 +3246,10 @@ function printAssignment(
     printed = indent(concat([hardline, printedRight]));
   } else if (
     (isBinaryish(rightNode) && !shouldInlineLogicalExpression(rightNode)) ||
-    (leftNode.type === "Identifier" || leftNode.type === "MemberExpression") &&
+    ((leftNode.type === "Identifier" || leftNode.type === "MemberExpression") &&
       (rightNode.type === "StringLiteral" ||
         (rightNode.type === "Literal" && typeof rightNode.value === "string") ||
-        isMemberExpressionChain(rightNode))
+        isMemberExpressionChain(rightNode)))
   ) {
     printed = indent(concat([line, printedRight]));
   } else {
